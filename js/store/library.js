@@ -1,0 +1,209 @@
+// Bibliothèque : aventures publiées avec le site (dossier adventures/) + aventures locales (IndexedDB).
+// Import / export d'une aventure en fichier .lhz (zip : adventure.json + images/).
+
+import { zipSync, unzipSync, strToU8, strFromU8 } from '../lib/fflate.js';
+import * as db from './db.js';
+import { normalizeAdventure, slug } from '../core/rules.js';
+import { ext } from '../core/plugins.js';
+
+const BUNDLED = 'adventures/';
+
+/** Liste : [{ id, title, author, description, cover, source: 'bundled'|'local', updated, sections }] */
+export async function listLibrary() {
+  const out = [];
+  try {
+    const idx = await fetch(BUNDLED + 'index.json').then(r => (r.ok ? r.json() : []));
+    for (const e of idx) out.push({ ...e, source: 'bundled' });
+  } catch { /* hors ligne sans cache : on continue avec les aventures locales */ }
+  for (const rec of await db.listAdventures()) {
+    const a = rec.adventure;
+    out.push({ id: a.id, title: a.meta.title, author: a.meta.author, description: a.meta.description, cover: a.meta.cover, source: 'local', updated: a.meta.updated, sections: Object.keys(a.sections).length });
+  }
+  return out;
+}
+
+/** Charge une aventure. Les aventures locales ont priorité sur celles du site. */
+export async function loadAdventure(id) {
+  const local = await db.getAdventure(id);
+  if (local) return { adventure: normalizeAdventure(local), source: 'local' };
+  let res;
+  try { res = await fetch(`${BUNDLED}${encodeURIComponent(id)}/adventure.json`); }
+  catch { throw new Error(`Aventure indisponible hors ligne : ${id}. Reconnectez-vous une fois pour l’ouvrir.`); }
+  if (res.status === 503) throw new Error(`Aventure indisponible hors ligne : ${id}. Reconnectez-vous une fois pour l’ouvrir.`);
+  if (!res.ok) throw new Error(`Aventure introuvable : ${id}`);
+  return { adventure: normalizeAdventure(await res.json()), source: 'bundled' };
+}
+
+export const saveAdventure = adv => db.putAdventure(adv);
+
+/* ---------- Images ---------- */
+const urlCache = new Map();
+
+/** URL affichable pour une image référencée par l'aventure ("images/1.webp"). */
+export async function assetUrl(adv, source, path) {
+  if (!path) return null;
+  if (/^(https?:|data:|blob:)/.test(path)) return path;
+  const key = `${adv.id}|${path}`;
+  if (urlCache.has(key)) return urlCache.get(key);
+  let url = null;
+  if (source === 'local') {
+    const blob = await db.getAsset(adv.id, path);
+    if (blob) url = URL.createObjectURL(blob);
+  }
+  if (!url) url = `${BUNDLED}${encodeURIComponent(adv.id)}/${path}`;
+  urlCache.set(key, url);
+  return url;
+}
+
+export function forgetAssetUrl(adv, path) {
+  const key = `${adv.id}|${path}`;
+  const url = urlCache.get(key);
+  if (url?.startsWith('blob:')) URL.revokeObjectURL(url);
+  urlCache.delete(key);
+}
+
+/** Réduit et compresse une image dans le navigateur (WebP, 1600 px max). */
+export async function compressImage(file, maxSide = 1600, quality = 0.82) {
+  if (file.type === 'image/svg+xml' || file.type === 'image/gif') return file;
+  const bmp = await createImageBitmap(file);
+  const scale = Math.min(1, maxSide / Math.max(bmp.width, bmp.height));
+  const w = Math.round(bmp.width * scale), h = Math.round(bmp.height * scale);
+  const canvas = new OffscreenCanvas(w, h);
+  canvas.getContext('2d').drawImage(bmp, 0, 0, w, h);
+  const blob = await canvas.convertToBlob({ type: 'image/webp', quality });
+  return blob.size < file.size ? blob : file;
+}
+
+/** Enregistre une image pour une aventure locale et renvoie son chemin. */
+export async function addImage(adv, file, name) {
+  const blob = await compressImage(file);
+  const ext = blob.type === 'image/webp' ? 'webp' : (file.name.split('.').pop() || 'png').toLowerCase();
+  const path = `images/${slug(name || file.name.replace(/\.[^.]+$/, ''))}-${Date.now().toString(36)}.${ext}`;
+  await db.putAsset(adv.id, path, blob);
+  return path;
+}
+
+/** Enregistre un fichier audio (ambiance) pour une aventure locale et renvoie son chemin. */
+export async function addAudio(adv, file, name) {
+  if (file.size > 15 * 1024 * 1024) throw new Error('fichier trop lourd (15 Mo maximum)');
+  const ext = (file.name.split('.').pop() || 'mp3').toLowerCase();
+  const path = `sons/${slug(name || file.name.replace(/\.[^.]+$/, ''))}-${Date.now().toString(36)}.${ext}`;
+  await db.putAsset(adv.id, path, file);
+  return path;
+}
+
+/* ---------- Import / export .lhz ---------- */
+
+function imagePaths(adv) {
+  const paths = new Set();
+  if (adv.meta.cover) paths.add(adv.meta.cover);
+  if (adv.meta.sound) paths.add(adv.meta.sound);
+  Object.values(adv.sections).forEach(s => {
+    if (s.image) paths.add(s.image);
+    if (s.sound) paths.add(s.sound);
+    (s.blocks || []).forEach(b => (b.enemies || []).forEach(e => e.image && paths.add(e.image)));
+    (s.blocks || []).forEach(b => typeof b.image === 'string' && paths.add(b.image)); // image propre à un bloc (ex. figure d'un défi)
+  });
+  Object.values(adv.items).forEach(i => i.image && paths.add(i.image));
+  Object.values(adv.companions || {}).forEach(c => c?.image && paths.add(c.image)); // portraits (greffon compagnons)
+  // Fichiers cités par les greffons (registerAssets), ex. l'image d'une carte cliquable.
+  for (const f of ext.assets) { try { (f(adv) || []).forEach(p => p && paths.add(p)); } catch (e) { console.warn('[greffon] registerAssets', e); } }
+  return [...paths].filter(p => !/^(https?:|data:|blob:)/.test(p));
+}
+
+/**
+ * Construit le fichier .lhz d'une aventure (locale ou publiée).
+ * Les fichiers qui n'ont pas pu être lus (hors ligne…) sont listés dans `blob.missing`.
+ */
+export async function exportAdventure(adv, source) {
+  const files = { 'adventure.json': strToU8(JSON.stringify(adv, null, 2)) };
+  const missing = [];
+  for (const p of imagePaths(adv)) {
+    let blob = source === 'local' ? await db.getAsset(adv.id, p) : null;
+    if (!blob) { try { const r = await fetch(`${BUNDLED}${encodeURIComponent(adv.id)}/${p}`); if (r.ok) blob = await r.blob(); } catch { /* image absente */ } }
+    if (blob) files[p] = [new Uint8Array(await blob.arrayBuffer()), { level: 0 }];
+    else missing.push(p);
+  }
+  const out = new Blob([zipSync(files)], { type: 'application/zip' });
+  out.missing = missing;
+  return out;
+}
+
+const MIME = { mp3: 'audio/mpeg', ogg: 'audio/ogg', oga: 'audio/ogg', opus: 'audio/ogg', wav: 'audio/wav', m4a: 'audio/mp4', webp: 'image/webp', png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', svg: 'image/svg+xml' };
+
+/** Identifiant sûr (lettres, chiffres, tirets) : sinon on le recalcule à partir du titre. */
+const SAFE_ID = /^[a-z0-9][a-z0-9_-]{0,99}$/i;
+const freeId = (base, taken) => { let id; do id = `${slug(base)}-${Math.random().toString(36).slice(2, 6)}`; while (taken.has(id)); return id; };
+
+/** Aventure déjà présente sous cet identifiant : { title, source } (locale, ou publiée sur le site), sinon null. */
+export async function existingAdventure(id) {
+  const local = await db.getAdventure(id).catch(() => null);
+  if (local) return { title: local.meta?.title || id, source: 'local' };
+  try {
+    const idx = await fetch(BUNDLED + 'index.json').then(r => (r.ok ? r.json() : []));
+    const e = idx.find(x => x.id === id);
+    if (e) return { title: e.title || id, source: 'bundled' };
+  } catch { /* hors ligne */ }
+  return null;
+}
+
+/**
+ * Importe un .lhz (ou un adventure.json seul). Renvoie l'aventure enregistrée localement.
+ * `onConflict(existing, adv)` : appelé si l'identifiant est déjà pris (aventure locale ou publiée) ; il renvoie
+ * 'replace' (remplacer), 'copy' (garder les deux : nouvel identifiant) ou 'cancel'. Sans lui, l'import remplace.
+ */
+export async function importAdventure(file, { asCopy = false, onConflict = null } = {}) {
+  const buf = new Uint8Array(await file.arrayBuffer());
+  let adv, files = {};
+  if (buf[0] === 0x50 && buf[1] === 0x4b) {
+    files = unzipSync(buf);
+    const json = files['adventure.json'] || Object.entries(files).find(([k]) => k.endsWith('adventure.json'))?.[1];
+    if (!json) throw new Error('Ce fichier ne contient pas de adventure.json.');
+    adv = JSON.parse(strFromU8(json));
+  } else {
+    adv = JSON.parse(new TextDecoder().decode(buf));
+  }
+  adv = normalizeAdventure(adv);
+  if (adv.id && !SAFE_ID.test(String(adv.id))) adv.id = slug(adv.id);
+  if (asCopy || !adv.id) adv.id = slug(adv.meta.title) + '-' + Math.random().toString(36).slice(2, 6);
+  else if (onConflict) {
+    const existing = await existingAdventure(adv.id);
+    if (existing) {
+      const choice = await onConflict(existing, adv);
+      if (choice === 'cancel') return null;
+      if (choice !== 'replace') {
+        const taken = new Set((await db.listAdventures()).map(r => r.adventure?.id));
+        taken.add(adv.id);
+        adv.id = freeId(adv.meta.title || adv.id, taken);
+      }
+    }
+  }
+  for (const [name, data] of Object.entries(files)) {
+    if (name.endsWith('/') || name.endsWith('adventure.json')) continue;
+    const ext = name.split('.').pop().toLowerCase();
+    await db.putAsset(adv.id, name.replace(/^[^/]*\/(?=(images|sons)\/)/, ''), new Blob([data], { type: MIME[ext] || 'application/octet-stream' }));
+  }
+  return db.putAdventure(adv);
+}
+
+/** Copie une aventure publiée (ou locale) pour la modifier. */
+export async function duplicateAdventure(adv, source, title) {
+  const blob = await exportAdventure(adv, source);
+  // Une copie sans ses images les perdrait pour toujours (elles ne seraient ni ici ni en ligne sous le nouvel identifiant).
+  if (source !== 'local' && blob.missing.length) {
+    throw new Error(`${blob.missing.length} image(s) ou son(s) n’ont pas pu être lus (hors ligne ?) : réessayez une fois connecté.`);
+  }
+  const copy = await importAdventure(new File([blob], 'copie.lhz'), { asCopy: true });
+  copy.meta.title = title || `${adv.meta.title} (copie)`;
+  return db.putAdventure(copy);
+}
+
+/** Déclenche le téléchargement d'un Blob. */
+export function download(blob, filename) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  document.body.append(a);
+  a.click();
+  setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+}

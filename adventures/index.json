@@ -1,0 +1,26 @@
+[
+  {
+    "id": "mission-neurones",
+    "title": "La Réunion, l’île cerveau : Mission neurones",
+    "author": "Ibrahim Moullan (texte) et Florian Tobé (illustrations)",
+    "description": "En 1153, un cyclone pousse des navigateurs arabes vers une île en forme de cerveau. Avec les marrons, tu accompagnes tour à tour quatre groupes à travers ses lobes : écouter, se repérer, voir, parler et décider. Trois versions : Petit explorateur (5-7 ans), Pisteur (8-9 ans), Gardien de la mémoire (10-11 ans et plus). Un conte d’Ibrahim Moullan illustré par Florian Tobé, collection « Le cerveau expliqué aux petits explorateurs ».",
+    "cover": "images/couverture.webp",
+    "sections": 56
+  },
+  {
+    "id": "la-tour-de-brume",
+    "title": "La Tour de Brume",
+    "author": "Exemple Livre-Héros",
+    "description": "Une courte aventure pour découvrir le moteur : une boutique, des dés, des combats, une énigme, de la magie, une nuit à la belle étoile et deux fins.",
+    "cover": "images/couverture.svg",
+    "sections": 19
+  },
+  {
+    "id": "le-phare-des-nombres",
+    "title": "Le Phare des Nombres",
+    "author": "Livre-Héros (aventure de démonstration)",
+    "description": "À La Réunion, rallumez le vieux phare avant la nuit : du volcan au lagon, avec Anissa, des énigmes et des formules. Pour les 11-14 ans. Aventure de démonstration de tous les greffons ; pour les testeurs, le défi Zefor du labyrinthe de l’automate accepte le code de démonstration PHARE974.",
+    "cover": "images/couverture.svg",
+    "sections": 31
+  }
+]
